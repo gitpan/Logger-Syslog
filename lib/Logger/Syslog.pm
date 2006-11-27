@@ -1,8 +1,14 @@
 package Logger::Syslog;
 
+use strict;
+use warnings;
+use Carp;
+use Sys::Syslog qw(:DEFAULT setlogsock); 
+use File::Basename;
+
 =head1 NAME
 
-Logger::Syslog -- an simple wrapper over Syslog for Perl 
+Logger::Syslog -- an intuitive wrapper over Syslog for Perl 
 
 =head1 DESCRIPTION
 
@@ -26,26 +32,21 @@ the syslog socket can happen in mod_perl env).
 
     use Logger::Syslog;
 
-    info("Starting at".localtime());
-    
-    #...
-
-    if (error) {
+    info("Starting at ".localtime());
+    ...
+    if ($error) {
         error("An error occured!");
         exit 1;
     }
-
-    notice("There something to notify");
     ...
+    notice("There something to notify");
      
-=head1 FUNCTIONS
-
 =cut
 
 BEGIN {
 	use Exporter ;
 	use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS %SIG);
-	$VERSION = "1.0";
+	$VERSION = "1.1";
 	@ISA = ( 'Exporter' ) ;
 	@EXPORT = qw (
 		&debug
@@ -64,53 +65,54 @@ BEGIN {
 	%EXPORT_TAGS = (":all"=>[],);
 }
 
-END {
-    eval {        
-	    logger_close();
-    };
-}
-
-use strict;
-use warnings;
-use Carp;
-use Sys::Syslog qw(:DEFAULT setlogsock); 
-use File::Basename;
-
 sub __get_script_name();
-my $DEFAULT_FACILITY = "user";
+my  $DEFAULT_FACILITY = "user";
 our $fullname = __get_script_name();
 our $basename = basename($fullname);
 
-# If we're not under mod_perl, let's open the Syslog socket.
-if (! defined $ENV{'MOD_PERL'}) {
-    eval {        
-        setlogsock('unix');
-        openlog($basename, 'pid', $DEFAULT_FACILITY);
-    };
-}
+=head1 FUNCTIONS
 
 =head2 logger_init
 
-That function has to be called in mod_perl environment.
-It will open the Syslog socket properly.
+Call this to explicitly open a Syslog socket. You can optionaly specify 
+a Syslog facility.
+
+That function is called when you use the module, if you're not in a mod_perl 
+environement.
+
+Examples: 
+
+    # open a syslog socket with default facility (user)
+    logger_init();
+
+    # open a syslog socket on the 'local' facility
+    logger_init('local');
 
 =cut
 
-sub logger_init()
+sub logger_init(;$)
 {
-    return unless $ENV{'MOD_PERL'};
+    my ($facility) = @_;
+    $facility = $DEFAULT_FACILITY unless defined $facility;
+
     eval {
         setlogsock('unix');
-        $basename = basename($ENV{'SCRIPT_FILENAME'});
         $fullname = __get_script_name();
-        openlog($basename, 'pid', $DEFAULT_FACILITY);
+        openlog($fullname, 'pid', $facility);
         logger_prefix("");
     };
+}
+
+# If we're not under mod_perl, let's open the Syslog socket.
+if (! defined $ENV{'MOD_PERL'}) {
+    logger_init();
 }
 
 =head2 logger_close
 
 Call this to close the Syslog socket.
+
+That function is called automatically when the calling program exits.
 
 =cut
 
@@ -118,6 +120,12 @@ sub logger_close()
 {
     eval {
         closelog();
+    };
+}
+
+END {
+    eval {        
+	    logger_close();
     };
 }
 
@@ -144,16 +152,6 @@ sub logger_prefix(;$)
         $g_rh_prefix->{$fullname} = $prefix;
 }
 
-my $LOG_FLAGS	=	{
-	debug	=>	1,
-	info	=>	1,
-	notice	=>	1,
-	warning =>	1,
-	err	=>	1,
-	crit 	=>	1,
-	alert	=>	1
-};
-
 my %g_rh_label = (
 	info    => 'info ',
 	notice  => 'note ',
@@ -167,7 +165,11 @@ my %g_rh_label = (
 
 =head2 logger_set_default_facility(facility)
 
-You can choose which facility to use, the default one is "user".
+You can choose which facility to use, the default one is "user".  Use that
+function if you want to switch smoothly from a facility to another.  
+
+That function will close the existing socket and will open a new one with the
+appropriate facility.
 
 Example:
 
@@ -178,106 +180,56 @@ Example:
 sub logger_set_default_facility($)
 {
     my ($facility) = @_;
-    $DEFAULT_FACILITY = $facility;
+    if ($facility ne $DEFAULT_FACILITY) {
+        logger_close();
+        logger_init($facility);
+    }
 }
 
-=head2 debug(message)
+=head1 LOGGING
 
-Send a message to syslog, of the level "debug".
+Logger::Syslog provides one function per Syslog level to let you send messages.
+If you want to send a debug message, just use debug(), for a warning, use
+warning() and so on...
+
+All those function have the same signature : thay take a string as their only
+argument, which is the message to send to syslog.
+
+Examples:
+
+    debug("my program starts at ".localtime());
+    ...
+    warning("some strange stuff occured");
+    ...
+    error("should not go there !");
+    ...
+    notice("Here is my notice");
 
 =cut
 
-sub debug($)
+sub AUTOLOAD 
 {
 	my ($message) = @_;
+	our $AUTOLOAD;
+	$AUTOLOAD =~ s/^.*:://;
+	return if ($AUTOLOAD eq 'DESTROY');
+
 	return 0 unless defined $message and length $message;
-	return log_with_syslog('debug', $message);
+    my @supported = qw(debug info warning err error notice alert crit critic);
+
+	if (grep /^$AUTOLOAD$/, @supported) {
+        my $level = $AUTOLOAD;
+
+        $level = 'err' if ($level eq 'error');
+        $level = 'crit' if ($level eq 'critic');
+
+        log_with_syslog($level, $message);
+    }
+    else {
+        croak "Unsupported function : $AUTOLOAD";
+    }
 }
-
-=head2 info(message)
-
-Send a message to syslog, of the level "info".
-
-=cut
-
-sub info($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('info', $message);
-}
-
-=head2 notice(message)
-
-Send a message to syslog, of the level "notice".
-
-=cut
-
-=head2 notice(message)
-
-Envoie un message de type notice a syslog
-
-=cut
-
-sub notice($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('notice', $message);
-}
-
-=head2 warning(message)
-
-Send a message to syslog, of the level "warning".
-
-=cut
-
-sub warning($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('warning', $message);
-}
-
-=head2 error(message)
-
-Send a message to syslog, of the level "error".
-
-=cut
-
-sub error ($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('err', $message);
-}
-
-=head2 critic(message)
-
-Send a message to syslog, of the level "critic".
-
-=cut
-
-sub critic ($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('crit', $message);
-}
-
-=head2 alert(message)
-
-Send a message to syslog, of the level "alert".
-
-=cut
-
-sub alert ($)
-{
-	my ($message) = @_;
-	return 0 unless defined $message and length $message;
-	return log_with_syslog('alert', $message);
-}
-
+		
 sub log_with_syslog ($$)
 {
 	my ($level, $message) = @_;
@@ -295,7 +247,6 @@ sub log_with_syslog ($$)
 	$fonction = $basename unless defined $fonction;
 	$level = lc($level);
 	$level = 'info' unless defined $level and length $level;
-	return 0 unless $LOG_FLAGS->{$level}; 
 	
 	unless (defined $message and length $message) { 
 		$message = "[void]";
